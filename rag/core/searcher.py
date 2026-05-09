@@ -57,21 +57,11 @@ def search(
         params,
     ).fetchall()
 
-    results = [
-        SearchResult(
-            score=float(row["score"]),
-            chunk_id=row["chunk_id"],
-            doc_id=row["doc_id"],
-            source_path=row["source_path"],
-            source_type=row["source_type"],
-            title=row["title"] or "",
-            section=row["section"] or "",
-            text=row["text"] or "",
-            snippet=row["snippet"] or make_snippet(row["text"] or "", query),
-            metadata=json.loads(row["metadata_json"] or "{}"),
-        )
-        for row in rows
-    ]
+    results = [row_to_result(row, query) for row in rows]
+    if len(results) < limit and should_use_substring_fallback(query):
+        seen_chunk_ids = {result.chunk_id for result in results}
+        fallback_rows = substring_search(conn, query, limit - len(results), source_type, mode, seen_chunk_ids)
+        results.extend(row_to_result(row, query, fallback=True) for row in fallback_rows)
     conn.close()
     return results
 
@@ -81,6 +71,89 @@ def build_fts_query(query: str, mode: str = "any") -> str:
     safe_tokens = [token.replace('"', '""') for token in tokens if token.strip()]
     operator = " OR " if mode == "any" else " "
     return operator.join(f'"{token}"' for token in safe_tokens)
+
+
+def should_use_substring_fallback(query: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in query)
+
+
+def substring_search(conn, query: str, limit: int, source_type: str | None, mode: str, seen_chunk_ids: set[str]):
+    tokens = [token for token in QUERY_TOKEN_RE.findall(query) if token.strip()]
+    if not tokens or limit <= 0:
+        return []
+
+    token_clauses: list[str] = []
+    params: list[object] = []
+    for token in tokens:
+        escaped = escape_like(token)
+        clause = """
+        (
+            c.title LIKE ? ESCAPE '\\' OR
+            c.section LIKE ? ESCAPE '\\' OR
+            c.text LIKE ? ESCAPE '\\' OR
+            c.source_path LIKE ? ESCAPE '\\'
+        )
+        """
+        token_clauses.append(clause)
+        params.extend([f"%{escaped}%"] * 4)
+
+    operator = " OR " if mode == "any" else " AND "
+    source_filter = ""
+    if source_type:
+        source_filter = "AND c.source_type = ?"
+        params.append(source_type)
+
+    exclude_filter = ""
+    if seen_chunk_ids:
+        placeholders = ", ".join("?" for _ in seen_chunk_ids)
+        exclude_filter = f"AND c.chunk_id NOT IN ({placeholders})"
+        params.extend(sorted(seen_chunk_ids))
+
+    params.append(limit)
+    return conn.execute(
+        f"""
+        SELECT
+            0.0 AS score,
+            c.chunk_id,
+            c.doc_id,
+            c.source_path,
+            c.source_type,
+            c.title,
+            c.section,
+            c.text,
+            c.metadata_json,
+            NULL AS snippet
+        FROM chunks c
+        WHERE ({operator.join(token_clauses)})
+        {source_filter}
+        {exclude_filter}
+        ORDER BY c.source_path, c.chunk_index
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+
+
+def escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def row_to_result(row, query: str, fallback: bool = False) -> SearchResult:
+    score = float(row["score"])
+    if fallback:
+        score = 0.0
+    return SearchResult(
+        score=score,
+        chunk_id=row["chunk_id"],
+        doc_id=row["doc_id"],
+        source_path=row["source_path"],
+        source_type=row["source_type"],
+        title=row["title"] or "",
+        section=row["section"] or "",
+        text=row["text"] or "",
+        snippet=row["snippet"] or make_snippet(row["text"] or "", query),
+        metadata=json.loads(row["metadata_json"] or "{}"),
+    )
 
 
 def make_snippet(text: str, query: str, width: int = 240) -> str:
