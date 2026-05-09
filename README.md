@@ -52,6 +52,15 @@ python .\rag\cli\search.py "RegisterNatives"
 python .\rag\cli\search.py "ollvm 字符串加密" --top-k 10
 python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --type code
 python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --mode all
+python .\rag\cli\search.py "设备指纹" --context 1
+```
+
+Inspect indexed documents before drilling into a long article:
+
+```powershell
+python .\rag\cli\docs.py list
+python .\rag\cli\docs.py outline "某红薯"
+python .\rag\cli\docs.py show "某红薯" --section "设备指纹" --limit 3
 ```
 
 Inspect or clean extracted media:

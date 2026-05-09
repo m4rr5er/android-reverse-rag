@@ -10,6 +10,7 @@ bootstrap()
 import argparse
 
 from rag.core.config import load_config
+from rag.core.documents import neighboring_chunks
 from rag.core.searcher import search
 
 
@@ -20,6 +21,7 @@ def main() -> int:
     parser.add_argument("--type", dest="source_type", default=None, help="Filter by source type: html, markdown, text, code.")
     parser.add_argument("--mode", choices=("any", "all"), default="any", help="Match any query token or require all tokens.")
     parser.add_argument("--show-full", action="store_true", help="Print full chunk text instead of a snippet.")
+    parser.add_argument("--context", type=int, default=0, help="Also print N neighboring chunks before/after each result.")
     args = parser.parse_args()
 
     config = load_config()
@@ -37,6 +39,15 @@ def main() -> int:
         print(f"section: {result.section}")
         print()
         print(body.strip())
+        if args.context > 0:
+            neighbors = neighboring_chunks(config, result.chunk_id, args.context)
+            if neighbors:
+                print()
+                print(f"-- context +/- {args.context} chunks --")
+                for neighbor in neighbors:
+                    print(f"[context chunk {neighbor.chunk_index}] section: {neighbor.section}")
+                    print(neighbor.text.strip())
+                    print()
         print()
     return 0
 
