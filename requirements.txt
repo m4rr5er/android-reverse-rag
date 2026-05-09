@@ -3,6 +3,14 @@
 # Optional PDF extractors, installed only if you want stronger PDF parsing:
 # pypdf>=4.0
 # PyMuPDF>=1.24
+# pdfplumber>=0.11
+#
+# Optional OCR / image text extraction:
+# pillow>=10.0
+# pytesseract>=0.3
+#
+# Optional code-aware chunking:
+# tree-sitter-languages>=1.10
 #
 # Future optional dependencies may include beautifulsoup4, python-docx,
 # tesseract bindings, sentence-transformers, sqlite-vec, or chromadb.

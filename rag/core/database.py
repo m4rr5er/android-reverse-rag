@@ -41,6 +41,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   source_path UNINDEXED,
   tokenize = "unicode61 tokenchars '_.$/@:#-'"
 );
+
+CREATE TABLE IF NOT EXISTS chunk_terms (
+  term TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  PRIMARY KEY (term, chunk_id),
+  FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_terms_chunk_id ON chunk_terms(chunk_id);
 """
 
 
@@ -58,6 +67,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def clear_db(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM chunk_terms")
     conn.execute("DELETE FROM chunks_fts")
     conn.execute("DELETE FROM chunks")
     conn.execute("DELETE FROM documents")
@@ -71,4 +81,3 @@ def has_fts5(conn: sqlite3.Connection) -> bool:
         return True
     except sqlite3.OperationalError:
         return False
-

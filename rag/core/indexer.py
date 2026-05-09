@@ -7,8 +7,10 @@ from pathlib import Path
 from rag.core.chunking import chunk_document
 from rag.core.config import RAGConfig, ensure_runtime_dirs
 from rag.core.database import clear_db, connect, init_db
+from rag.core.media import garbage_collect_media, reset_media_manifest, update_media_manifest
 from rag.core.models import Chunk, ParsedDocument, display_path
 from rag.core.parsers import parse_file, supported_file
+from rag.core.terms import generate_chunk_terms
 
 
 def utc_now() -> str:
@@ -27,6 +29,7 @@ def ingest(config: RAGConfig, full: bool = False) -> dict[str, int]:
     init_db(conn)
     if full:
         clear_db(conn)
+        reset_media_manifest(config.data_dir)
 
     source_files = iter_source_files(config.corpus_dir)
     current_source_paths = {display_path(path, config.project_root) for path in source_files}
@@ -37,6 +40,8 @@ def ingest(config: RAGConfig, full: bool = False) -> dict[str, int]:
         "skipped": 0,
         "chunks": 0,
         "deleted": 0,
+        "media_deleted_files": 0,
+        "media_deleted_entries": 0,
         "failed": 0,
     }
 
@@ -47,17 +52,22 @@ def ingest(config: RAGConfig, full: bool = False) -> dict[str, int]:
         stats["seen"] += 1
         try:
             document = parse_file(path, config.project_root, image_output_dir=config.data_dir / "images")
-            if not full and unchanged(conn, document):
+            if not full and unchanged(conn, document) and document_has_terms(conn, document):
+                update_media_manifest(config.data_dir, document.source_path, list(document.metadata.get("images", [])))
                 stats["skipped"] += 1
                 continue
             chunks = chunk_document(document, config.max_chars, config.overlap_chars)
             upsert_document(conn, document, chunks)
+            update_media_manifest(config.data_dir, document.source_path, list(document.metadata.get("images", [])))
             stats["indexed"] += 1
             stats["chunks"] += len(chunks)
         except Exception as exc:
             stats["failed"] += 1
             print(f"[ingest:error] {path}: {exc}")
 
+    active_rows = conn.execute("SELECT source_path FROM documents").fetchall()
+    active_source_paths = {row["source_path"] for row in active_rows}
+    stats.update(garbage_collect_media(config.data_dir, active_source_paths))
     conn.commit()
     conn.close()
     return stats
@@ -82,6 +92,20 @@ def unchanged(conn, document: ParsedDocument) -> bool:
     if row is None:
         return False
     return row["sha256"] == document.sha256 and row["size_bytes"] == document.size_bytes
+
+
+def document_has_terms(conn, document: ParsedDocument) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM chunks c
+        JOIN chunk_terms t ON t.chunk_id = c.chunk_id
+        WHERE c.doc_id = ?
+        LIMIT 1
+        """,
+        (document.doc_id,),
+    ).fetchone()
+    return row is not None
 
 
 def upsert_document(conn, document: ParsedDocument, chunks: list[Chunk]) -> None:
@@ -125,6 +149,7 @@ def delete_document(conn, source_path: str) -> None:
     ).fetchall()
     for row in rows:
         conn.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (row["chunk_id"],))
+        conn.execute("DELETE FROM chunk_terms WHERE chunk_id = ?", (row["chunk_id"],))
     conn.execute("DELETE FROM documents WHERE source_path = ?", (source_path,))
 
 
@@ -155,4 +180,8 @@ def insert_chunk(conn, chunk: Chunk) -> None:
         VALUES (?, ?, ?, ?, ?)
         """,
         (chunk.chunk_id, chunk.title, chunk.section, chunk.text, chunk.source_path),
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO chunk_terms (term, chunk_id) VALUES (?, ?)",
+        [(term, chunk.chunk_id) for term in generate_chunk_terms(chunk.title, chunk.section, chunk.text, chunk.source_path)],
     )

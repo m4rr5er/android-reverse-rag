@@ -78,6 +78,10 @@ def split_markdownish(text: str) -> list[tuple[str, str]]:
 
 
 def split_code_sections(text: str, language: str, max_chars: int) -> list[tuple[str, str]]:
+    sections = split_with_tree_sitter(text, language)
+    if sections:
+        return merge_small_code_sections(sections, max_chars)
+
     if language == "smali":
         sections = split_smali_methods(text)
     elif language == "py":
@@ -92,6 +96,70 @@ def split_code_sections(text: str, language: str, max_chars: int) -> list[tuple[
     if not sections:
         sections = [("code", part) for part in split_code_blocks(text, max_chars)]
     return merge_small_code_sections(sections, max_chars)
+
+
+def split_with_tree_sitter(text: str, language: str) -> list[tuple[str, str]]:
+    language_map = {
+        "py": "python",
+        "js": "javascript",
+        "ts": "typescript",
+        "java": "java",
+        "kt": "kotlin",
+        "c": "c",
+        "cpp": "cpp",
+        "h": "c",
+        "hpp": "cpp",
+    }
+    parser_name = language_map.get(language)
+    if not parser_name:
+        return []
+    try:
+        from tree_sitter_languages import get_parser  # type: ignore
+    except ImportError:
+        return []
+    try:
+        parser = get_parser(parser_name)
+        tree = parser.parse(text.encode("utf-8"))
+    except Exception:
+        return []
+
+    interesting_types = {
+        "function_definition",
+        "class_definition",
+        "method_declaration",
+        "constructor_declaration",
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "function_declaration",
+        "lexical_declaration",
+    }
+    nodes = [node for node in tree.root_node.children if node.type in interesting_types and node.end_byte > node.start_byte]
+    if not nodes:
+        return []
+
+    sections: list[tuple[str, str]] = []
+    if nodes[0].start_byte > 0:
+        preamble = text.encode("utf-8")[: nodes[0].start_byte].decode("utf-8", errors="ignore").strip()
+        if preamble:
+            sections.append(("preamble", preamble))
+    data = text.encode("utf-8")
+    for index, node in enumerate(nodes):
+        block = data[node.start_byte : node.end_byte].decode("utf-8", errors="ignore").strip()
+        name = tree_sitter_node_name(node, data) or f"{node.type}-{index}"
+        if block:
+            sections.append((name, block))
+    return sections
+
+
+def tree_sitter_node_name(node, data: bytes) -> str:
+    for child in node.children:
+        if child.type in {"identifier", "type_identifier", "property_identifier"}:
+            return data[child.start_byte : child.end_byte].decode("utf-8", errors="ignore")
+        nested = tree_sitter_node_name(child, data)
+        if nested:
+            return nested
+    return ""
 
 
 def split_smali_methods(text: str) -> list[tuple[str, str]]:

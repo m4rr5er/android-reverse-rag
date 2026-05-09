@@ -6,6 +6,7 @@ import re
 from rag.core.config import RAGConfig, ensure_runtime_dirs
 from rag.core.database import connect, init_db
 from rag.core.models import SearchResult
+from rag.core.terms import query_term_groups
 
 
 QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_.$/@:#-]+|[\u4e00-\u9fff]+")
@@ -60,7 +61,12 @@ def search(
     results = [row_to_result(row, query) for row in rows]
     if len(results) < limit and should_use_substring_fallback(query):
         seen_chunk_ids = {result.chunk_id for result in results}
-        fallback_rows = substring_search(conn, query, limit - len(results), source_type, mode, seen_chunk_ids)
+        term_rows = term_index_search(conn, query, limit - len(results), source_type, mode, seen_chunk_ids)
+        term_results = [row_to_result(row, query, fallback=True) for row in term_rows]
+        results.extend(term_results)
+        seen_chunk_ids.update(result.chunk_id for result in term_results)
+    if len(results) < limit and should_use_substring_fallback(query):
+        fallback_rows = substring_search(conn, query, limit - len(results), source_type, mode, {result.chunk_id for result in results})
         results.extend(row_to_result(row, query, fallback=True) for row in fallback_rows)
     conn.close()
     return results
@@ -127,6 +133,56 @@ def substring_search(conn, query: str, limit: int, source_type: str | None, mode
         WHERE ({operator.join(token_clauses)})
         {source_filter}
         {exclude_filter}
+        ORDER BY c.source_path, c.chunk_index
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+
+
+def term_index_search(conn, query: str, limit: int, source_type: str | None, mode: str, seen_chunk_ids: set[str]):
+    groups = query_term_groups(query)
+    if not groups or limit <= 0:
+        return []
+
+    matched_sets: list[set[str]] = []
+    for group in groups:
+        placeholders = ", ".join("?" for _ in group)
+        rows = conn.execute(f"SELECT DISTINCT chunk_id FROM chunk_terms WHERE term IN ({placeholders})", group).fetchall()
+        chunk_ids = {row["chunk_id"] for row in rows}
+        if chunk_ids:
+            matched_sets.append(chunk_ids)
+
+    if not matched_sets:
+        return []
+    candidate_ids = set.union(*matched_sets) if mode == "any" else set.intersection(*matched_sets)
+    candidate_ids.difference_update(seen_chunk_ids)
+    if not candidate_ids:
+        return []
+
+    placeholders = ", ".join("?" for _ in candidate_ids)
+    params: list[object] = sorted(candidate_ids)
+    source_filter = ""
+    if source_type:
+        source_filter = "AND c.source_type = ?"
+        params.append(source_type)
+    params.append(limit)
+    return conn.execute(
+        f"""
+        SELECT
+            0.0 AS score,
+            c.chunk_id,
+            c.doc_id,
+            c.source_path,
+            c.source_type,
+            c.title,
+            c.section,
+            c.text,
+            c.metadata_json,
+            NULL AS snippet
+        FROM chunks c
+        WHERE c.chunk_id IN ({placeholders})
+        {source_filter}
         ORDER BY c.source_path, c.chunk_index
         LIMIT ?
         """,

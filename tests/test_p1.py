@@ -37,6 +37,21 @@ class P1Tests(unittest.TestCase):
             self.assertEqual(second["deleted"], 1)
             self.assertEqual(search(config, "RegisterNatives"), [])
 
+    def test_chinese_term_index_supports_substring_search(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            corpus = root / "corpus"
+            data = root / "data"
+            corpus.mkdir()
+            source = corpus / "note.md"
+            source.write_text("# 逆向笔记\n\n这里记录风控设备指纹和参数分析。", encoding="utf-8")
+            config = RAGConfig(project_root=root, corpus_dir=corpus, data_dir=data, database_path=data / "rag.sqlite")
+
+            ingest(config, full=True)
+            results = search(config, "设备指纹", top_k=3)
+            self.assertEqual(len(results), 1)
+            self.assertIn("风控设备指纹", results[0].text)
+
     def test_docx_parser_extracts_paragraph_text(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
@@ -84,9 +99,10 @@ class P1Tests(unittest.TestCase):
                 <html>
                   <head><title>风控表格</title></head>
                   <body>
-                    <table>
+                    <table><caption>字段表</caption>
                       <tr><th>参数</th><th>含义</th></tr>
-                      <tr><td>x-mini-sig</td><td>签名字段</td></tr>
+                      <tr><td rowspan="2">x-mini-sig</td><td>签名字段</td></tr>
+                      <tr><td colspan="1">请求签名</td></tr>
                     </table>
                     <img alt="流程图" src="data:image/png;base64,iVBORw0KGgo=">
                   </body>
@@ -96,14 +112,46 @@ class P1Tests(unittest.TestCase):
             )
 
             parsed = parse_file(html_path, root, image_output_dir=root / "data" / "images")
+            self.assertIn("Table: 字段表", parsed.text)
             self.assertIn("| 参数 | 含义 |", parsed.text)
             self.assertIn("| x-mini-sig | 签名字段 |", parsed.text)
+            self.assertIn("| x-mini-sig | 请求签名 |", parsed.text)
             self.assertIn("[Image 1: 流程图]", parsed.text)
             self.assertEqual(parsed.metadata["table_count"], 1)
             image = parsed.metadata["images"][0]
             self.assertEqual(image["src"], "[inline-image]")
             self.assertEqual(image["mime_type"], "image/png")
             self.assertTrue((root / image["local_path"]).exists())
+
+            image_path = root / image["local_path"]
+            image_path.with_suffix(image_path.suffix + ".ocr.txt").write_text("图片中包含 JNI_OnLoad 流程", encoding="utf-8")
+            image_path.with_suffix(image_path.suffix + ".desc.txt").write_text("风控流程图", encoding="utf-8")
+            reparsed = parse_file(html_path, root, image_output_dir=root / "data" / "images")
+            self.assertIn("ocr=图片中包含 JNI_OnLoad 流程", reparsed.text)
+            self.assertIn("description=风控流程图", reparsed.text)
+
+    def test_media_gc_removes_orphaned_extracted_images(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            corpus = root / "corpus"
+            data = root / "data"
+            corpus.mkdir()
+            source = corpus / "sample.html"
+            source.write_text(
+                '<html><body><img alt="图" src="data:image/png;base64,iVBORw0KGgo="></body></html>',
+                encoding="utf-8",
+            )
+            config = RAGConfig(project_root=root, corpus_dir=corpus, data_dir=data, database_path=data / "rag.sqlite")
+
+            ingest(config, full=True)
+            image_files = list((data / "images").rglob("*.png"))
+            self.assertEqual(len(image_files), 1)
+
+            source.unlink()
+            stats = ingest(config)
+            self.assertEqual(stats["deleted"], 1)
+            self.assertGreaterEqual(stats["media_deleted_files"], 1)
+            self.assertEqual(list((data / "images").rglob("*.png")), [])
 
 
 def create_minimal_docx(path: Path, text: str) -> None:

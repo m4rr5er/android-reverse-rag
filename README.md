@@ -54,6 +54,13 @@ python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --type code
 python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --mode all
 ```
 
+Inspect or clean extracted media:
+
+```powershell
+python .\rag\cli\media.py list
+python .\rag\cli\media.py gc
+```
+
 ## Supported MVP File Types
 
 - HTML: `.html`, `.htm`
@@ -63,11 +70,15 @@ python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --mode all
 
 PDF parsing first tries optional libraries (`pypdf`, then `PyMuPDF`) and falls back to a basic built-in extractor for simple text streams. DOCX parsing uses Python standard library XML extraction.
 
-HTML parsing preserves tables as Markdown tables. Inline `data:image/...;base64` images are extracted to `data/images/`, while search snippets keep image markers such as:
+Chinese queries use SQLite FTS5 first, then a local n-gram term index, then a final substring fallback. This keeps exact reverse-engineering tokens searchable while making Chinese phrase searches such as `设备指纹` reliable.
+
+HTML parsing preserves tables as Markdown tables, including basic `caption`, `rowspan`, and `colspan` handling. Inline `data:image/...;base64` images are extracted to `data/images/`, tracked in `data/media-manifest.json`, and garbage-collected when source documents are removed. Search snippets keep image markers such as:
 
 ```text
 [Image 1: 图片] path=data/images/.../image-0001.webp mime=image/webp
 ```
+
+If an image has a sidecar file such as `image.webp.ocr.txt` or `image.webp.desc.txt`, that text is included in the image marker and metadata. If optional OCR dependencies are installed, image/PDF OCR is attempted automatically.
 
 ## Notes
 

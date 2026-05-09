@@ -24,7 +24,8 @@ def main() -> int:
         "ingest complete: "
         f"seen={stats['seen']} indexed={stats['indexed']} "
         f"skipped={stats['skipped']} chunks={stats['chunks']} "
-        f"deleted={stats['deleted']} failed={stats['failed']}"
+        f"deleted={stats['deleted']} media_deleted_files={stats['media_deleted_files']} "
+        f"failed={stats['failed']}"
     )
     return 1 if stats["failed"] else 0
 
