@@ -1,4 +1,8 @@
-# MVP has no required third-party dependencies.
-# Future optional dependencies may include beautifulsoup4, pypdf, python-docx,
+# MVP/P1 has no required third-party dependencies.
+#
+# Optional PDF extractors, installed only if you want stronger PDF parsing:
+# pypdf>=4.0
+# PyMuPDF>=1.24
+#
+# Future optional dependencies may include beautifulsoup4, python-docx,
 # tesseract bindings, sentence-transformers, sqlite-vec, or chromadb.
-

@@ -18,11 +18,12 @@ def main() -> int:
     parser.add_argument("query", help="Keyword query, for example: JNI_OnLoad RegisterNatives")
     parser.add_argument("--top-k", type=int, default=None, help="Number of results to return.")
     parser.add_argument("--type", dest="source_type", default=None, help="Filter by source type: html, markdown, text, code.")
+    parser.add_argument("--mode", choices=("any", "all"), default="any", help="Match any query token or require all tokens.")
     parser.add_argument("--show-full", action="store_true", help="Print full chunk text instead of a snippet.")
     args = parser.parse_args()
 
     config = load_config()
-    results = search(config, args.query, top_k=args.top_k, source_type=args.source_type)
+    results = search(config, args.query, top_k=args.top_k, source_type=args.source_type, mode=args.mode)
 
     if not results:
         print("no results")

@@ -2,7 +2,7 @@
 
 Local RAG knowledge base for Android reverse engineering, Frida, JNI, smali, native analysis, and anti-debugging research.
 
-This MVP uses a local CLI and SQLite FTS5 keyword search. It is designed so future API server, MCP tools, OCR, PDF parsing, and vector search can reuse the same `rag.core` modules.
+This MVP uses a local CLI and SQLite FTS5 keyword search. It is designed so future API server, MCP tools, OCR, and vector search can reuse the same `rag.core` modules.
 
 ## Layout
 
@@ -38,6 +38,12 @@ Build the index:
 python .\rag\cli\ingest.py --full
 ```
 
+Update the index incrementally after adding, changing, or deleting files:
+
+```powershell
+python .\rag\cli\ingest.py
+```
+
 Search:
 
 ```powershell
@@ -45,15 +51,18 @@ python .\rag\cli\search.py "frida 检测"
 python .\rag\cli\search.py "RegisterNatives"
 python .\rag\cli\search.py "ollvm 字符串加密" --top-k 10
 python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --type code
+python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --mode all
 ```
 
 ## Supported MVP File Types
 
 - HTML: `.html`, `.htm`
 - Markdown and text: `.md`, `.markdown`, `.txt`
+- Documents: `.pdf`, `.docx`
 - Code/config: `.smali`, `.java`, `.kt`, `.js`, `.ts`, `.py`, `.json`, `.xml`, `.c`, `.cpp`, `.h`, `.hpp`
+
+PDF parsing first tries optional libraries (`pypdf`, then `PyMuPDF`) and falls back to a basic built-in extractor for simple text streams. DOCX parsing uses Python standard library XML extraction.
 
 ## Notes
 
 `corpus/`, `data/`, and `index/` are ignored by Git because they may contain private research notes, samples, extracted content, OCR results, or generated indexes.
-

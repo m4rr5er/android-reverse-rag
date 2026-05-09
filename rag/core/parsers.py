@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -11,6 +14,7 @@ from rag.core.models import ParsedDocument, display_path
 
 HTML_EXTENSIONS = {".html", ".htm"}
 TEXT_EXTENSIONS = {".md", ".markdown", ".txt"}
+DOC_EXTENSIONS = {".pdf", ".docx"}
 CODE_EXTENSIONS = {
     ".smali",
     ".java",
@@ -25,7 +29,7 @@ CODE_EXTENSIONS = {
     ".h",
     ".hpp",
 }
-SUPPORTED_EXTENSIONS = HTML_EXTENSIONS | TEXT_EXTENSIONS | CODE_EXTENSIONS
+SUPPORTED_EXTENSIONS = HTML_EXTENSIONS | TEXT_EXTENSIONS | DOC_EXTENSIONS | CODE_EXTENSIONS
 
 
 class NormalizingHTMLParser(HTMLParser):
@@ -117,6 +121,10 @@ def source_type_for(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in HTML_EXTENSIONS:
         return "html"
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix == ".docx":
+        return "docx"
     if suffix in CODE_EXTENSIONS:
         return "code"
     if suffix in {".md", ".markdown"}:
@@ -151,16 +159,25 @@ def parse_file(path: Path, project_root: Path) -> ParsedDocument:
     source_type = source_type_for(path)
     sha256 = file_sha256(path)
     stat = path.stat()
-    raw_text = read_text(path)
     metadata: dict[str, object] = {"parser": source_type}
 
     if source_type == "html":
+        raw_text = read_text(path)
         parser = NormalizingHTMLParser()
         parser.feed(raw_text)
         text = parser.normalized_text()
         title = parser.title() or path.stem
         metadata["image_paths"] = parser.image_paths
+    elif source_type == "pdf":
+        text, page_count, parser_name = parse_pdf(path)
+        title = path.stem
+        metadata["parser"] = parser_name
+        metadata["page_count"] = page_count
+    elif source_type == "docx":
+        text, title = parse_docx(path)
+        title = title or path.stem
     else:
+        raw_text = read_text(path)
         text = raw_text.strip()
         title = path.stem
         if source_type == "code":
@@ -178,3 +195,146 @@ def parse_file(path: Path, project_root: Path) -> ParsedDocument:
         metadata=metadata,
     )
 
+
+def parse_docx(path: Path) -> tuple[str, str]:
+    paragraphs: list[str] = []
+    title = ""
+    with zipfile.ZipFile(path) as archive:
+        if "docProps/core.xml" in archive.namelist():
+            core = ET.fromstring(archive.read("docProps/core.xml"))
+            for node in core.iter():
+                if node.tag.endswith("title") and node.text:
+                    title = node.text.strip()
+                    break
+        document = ET.fromstring(archive.read("word/document.xml"))
+
+    body = first_child_ending(document, "body")
+    if body is None:
+        body = document
+    for child in body:
+        if child.tag.endswith("p"):
+            text = paragraph_text(child)
+            if text:
+                paragraphs.append(text)
+        elif child.tag.endswith("tbl"):
+            for row in child.iter():
+                if row.tag.endswith("tr"):
+                    cells = [paragraph_text(cell) for cell in row if cell.tag.endswith("tc")]
+                    cells = [cell for cell in cells if cell]
+                    if cells:
+                        paragraphs.append(" | ".join(cells))
+
+    return "\n\n".join(paragraphs).strip(), title
+
+
+def first_child_ending(node: ET.Element, suffix: str) -> ET.Element | None:
+    for child in node:
+        if child.tag.endswith(suffix):
+            return child
+    return None
+
+
+def paragraph_text(node: ET.Element) -> str:
+    parts: list[str] = []
+    for child in node.iter():
+        if child.tag.endswith("t") and child.text:
+            parts.append(child.text)
+        elif child.tag.endswith("tab"):
+            parts.append("\t")
+        elif child.tag.endswith("br"):
+            parts.append("\n")
+    return "".join(parts).strip()
+
+
+def parse_pdf(path: Path) -> tuple[str, int | None, str]:
+    pypdf_result = parse_pdf_with_pypdf(path)
+    if pypdf_result:
+        return (*pypdf_result, "pypdf")
+
+    pymupdf_result = parse_pdf_with_pymupdf(path)
+    if pymupdf_result:
+        return (*pymupdf_result, "pymupdf")
+
+    text = parse_pdf_basic(path)
+    return text, None, "pdf-basic"
+
+
+def parse_pdf_with_pypdf(path: Path) -> tuple[str, int] | None:
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except ImportError:
+        return None
+    try:
+        reader = PdfReader(str(path))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(page.strip() for page in pages if page.strip()), len(reader.pages)
+    except Exception:
+        return None
+
+
+def parse_pdf_with_pymupdf(path: Path) -> tuple[str, int] | None:
+    try:
+        import fitz  # type: ignore
+    except ImportError:
+        return None
+    try:
+        document = fitz.open(str(path))
+        pages = [page.get_text("text") for page in document]
+        page_count = document.page_count
+        document.close()
+        return "\n\n".join(page.strip() for page in pages if page.strip()), page_count
+    except Exception:
+        return None
+
+
+def parse_pdf_basic(path: Path) -> str:
+    data = path.read_bytes()
+    stream_texts: list[str] = []
+    for match in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, flags=re.S):
+        stream = match.group(1)
+        for candidate in (try_zlib(stream), stream):
+            if not candidate:
+                continue
+            extracted = extract_pdf_literals(candidate)
+            if extracted:
+                stream_texts.append(extracted)
+                break
+    if stream_texts:
+        return "\n\n".join(stream_texts)
+    fallback = data.decode("latin-1", errors="ignore")
+    return "\n".join(extract_readable_lines(fallback))
+
+
+def try_zlib(data: bytes) -> bytes | None:
+    try:
+        return zlib.decompress(data)
+    except zlib.error:
+        return None
+
+
+def extract_pdf_literals(data: bytes) -> str:
+    text = data.decode("latin-1", errors="ignore")
+    literals = re.findall(r"\((?:\\.|[^\\)])*\)\s*Tj", text)
+    array_literals = re.findall(r"\[(.*?)\]\s*TJ", text, flags=re.S)
+    parts: list[str] = []
+    for literal in literals:
+        parts.append(unescape_pdf_literal(literal.rsplit(")", 1)[0][1:]))
+    for array in array_literals:
+        for literal in re.findall(r"\((?:\\.|[^\\)])*\)", array):
+            parts.append(unescape_pdf_literal(literal[1:-1]))
+    return " ".join(part for part in parts if part).strip()
+
+
+def unescape_pdf_literal(value: str) -> str:
+    value = value.replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\")
+    value = value.replace(r"\n", "\n").replace(r"\r", "\n").replace(r"\t", "\t")
+    return value
+
+
+def extract_readable_lines(text: str) -> list[str]:
+    lines = []
+    for line in text.splitlines():
+        cleaned = re.sub(r"[^\x09\x0a\x0d\x20-\x7e\u4e00-\u9fff]+", " ", line).strip()
+        if len(cleaned) >= 24 and sum(char.isalpha() or "\u4e00" <= char <= "\u9fff" for char in cleaned) >= 8:
+            lines.append(cleaned)
+    return lines

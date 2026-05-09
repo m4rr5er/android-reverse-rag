@@ -11,12 +11,18 @@ from rag.core.models import SearchResult
 QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_.$/@:#-]+|[\u4e00-\u9fff]+")
 
 
-def search(config: RAGConfig, query: str, top_k: int | None = None, source_type: str | None = None) -> list[SearchResult]:
+def search(
+    config: RAGConfig,
+    query: str,
+    top_k: int | None = None,
+    source_type: str | None = None,
+    mode: str = "any",
+) -> list[SearchResult]:
     ensure_runtime_dirs(config)
     conn = connect(config.database_path)
     init_db(conn)
 
-    match_query = build_fts_query(query)
+    match_query = build_fts_query(query, mode)
     if not match_query:
         return []
 
@@ -70,10 +76,11 @@ def search(config: RAGConfig, query: str, top_k: int | None = None, source_type:
     return results
 
 
-def build_fts_query(query: str) -> str:
+def build_fts_query(query: str, mode: str = "any") -> str:
     tokens = QUERY_TOKEN_RE.findall(query)
     safe_tokens = [token.replace('"', '""') for token in tokens if token.strip()]
-    return " OR ".join(f'"{token}"' for token in safe_tokens)
+    operator = " OR " if mode == "any" else " "
+    return operator.join(f'"{token}"' for token in safe_tokens)
 
 
 def make_snippet(text: str, query: str, width: int = 240) -> str:
@@ -91,4 +98,3 @@ def make_snippet(text: str, query: str, width: int = 240) -> str:
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(text) else ""
     return prefix + text[start:end].strip() + suffix
-

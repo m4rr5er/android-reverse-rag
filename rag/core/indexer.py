@@ -7,7 +7,7 @@ from pathlib import Path
 from rag.core.chunking import chunk_document
 from rag.core.config import RAGConfig, ensure_runtime_dirs
 from rag.core.database import clear_db, connect, init_db
-from rag.core.models import Chunk, ParsedDocument
+from rag.core.models import Chunk, ParsedDocument, display_path
 from rag.core.parsers import parse_file, supported_file
 
 
@@ -28,15 +28,22 @@ def ingest(config: RAGConfig, full: bool = False) -> dict[str, int]:
     if full:
         clear_db(conn)
 
+    source_files = iter_source_files(config.corpus_dir)
+    current_source_paths = {display_path(path, config.project_root) for path in source_files}
+
     stats = {
         "seen": 0,
         "indexed": 0,
         "skipped": 0,
         "chunks": 0,
+        "deleted": 0,
         "failed": 0,
     }
 
-    for path in iter_source_files(config.corpus_dir):
+    if not full:
+        stats["deleted"] = prune_deleted_documents(conn, current_source_paths)
+
+    for path in source_files:
         stats["seen"] += 1
         try:
             document = parse_file(path, config.project_root)
@@ -54,6 +61,17 @@ def ingest(config: RAGConfig, full: bool = False) -> dict[str, int]:
     conn.commit()
     conn.close()
     return stats
+
+
+def prune_deleted_documents(conn, current_source_paths: set[str]) -> int:
+    rows = conn.execute("SELECT source_path FROM documents").fetchall()
+    deleted = 0
+    for row in rows:
+        source_path = row["source_path"]
+        if source_path not in current_source_paths:
+            delete_document(conn, source_path)
+            deleted += 1
+    return deleted
 
 
 def unchanged(conn, document: ParsedDocument) -> bool:
@@ -138,4 +156,3 @@ def insert_chunk(conn, chunk: Chunk) -> None:
         """,
         (chunk.chunk_id, chunk.title, chunk.section, chunk.text, chunk.source_path),
     )
-
