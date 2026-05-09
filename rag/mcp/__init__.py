@@ -1,0 +1,2 @@
+"""Future MCP server package."""
+

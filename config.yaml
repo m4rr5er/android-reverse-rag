@@ -1,0 +1,15 @@
+project:
+  name: android-reverse-rag
+
+paths:
+  corpus_dir: corpus
+  data_dir: data
+  database_path: data/rag.sqlite
+
+chunking:
+  max_chars: 1200
+  overlap_chars: 160
+
+search:
+  default_top_k: 5
+

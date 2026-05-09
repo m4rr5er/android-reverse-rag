@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local data
+corpus/
+data/
+index/
+*.sqlite
+*.sqlite-*
+*.db
+
+# Env
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+local-reverse-rag-design.md

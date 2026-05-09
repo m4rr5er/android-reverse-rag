@@ -1,0 +1,4 @@
+# MVP has no required third-party dependencies.
+# Future optional dependencies may include beautifulsoup4, pypdf, python-docx,
+# tesseract bindings, sentence-transformers, sqlite-vec, or chromadb.
+
