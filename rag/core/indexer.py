@@ -46,7 +46,7 @@ def ingest(config: RAGConfig, full: bool = False) -> dict[str, int]:
     for path in source_files:
         stats["seen"] += 1
         try:
-            document = parse_file(path, config.project_root)
+            document = parse_file(path, config.project_root, image_output_dir=config.data_dir / "images")
             if not full and unchanged(conn, document):
                 stats["skipped"] += 1
                 continue

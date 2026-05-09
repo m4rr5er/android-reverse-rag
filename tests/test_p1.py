@@ -75,6 +75,36 @@ class P1Tests(unittest.TestCase):
         self.assertTrue(any("check" in name for name in names))
         self.assertTrue(any("bypassTracerPid" in name for name in names))
 
+    def test_html_parser_extracts_tables_and_inline_images(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            html_path = root / "sample.html"
+            html_path.write_text(
+                """
+                <html>
+                  <head><title>风控表格</title></head>
+                  <body>
+                    <table>
+                      <tr><th>参数</th><th>含义</th></tr>
+                      <tr><td>x-mini-sig</td><td>签名字段</td></tr>
+                    </table>
+                    <img alt="流程图" src="data:image/png;base64,iVBORw0KGgo=">
+                  </body>
+                </html>
+                """,
+                encoding="utf-8",
+            )
+
+            parsed = parse_file(html_path, root, image_output_dir=root / "data" / "images")
+            self.assertIn("| 参数 | 含义 |", parsed.text)
+            self.assertIn("| x-mini-sig | 签名字段 |", parsed.text)
+            self.assertIn("[Image 1: 流程图]", parsed.text)
+            self.assertEqual(parsed.metadata["table_count"], 1)
+            image = parsed.metadata["images"][0]
+            self.assertEqual(image["src"], "[inline-image]")
+            self.assertEqual(image["mime_type"], "image/png")
+            self.assertTrue((root / image["local_path"]).exists())
+
 
 def create_minimal_docx(path: Path, text: str) -> None:
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

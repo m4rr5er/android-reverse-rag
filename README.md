@@ -63,6 +63,12 @@ python .\rag\cli\search.py "JNI_OnLoad RegisterNatives" --mode all
 
 PDF parsing first tries optional libraries (`pypdf`, then `PyMuPDF`) and falls back to a basic built-in extractor for simple text streams. DOCX parsing uses Python standard library XML extraction.
 
+HTML parsing preserves tables as Markdown tables. Inline `data:image/...;base64` images are extracted to `data/images/`, while search snippets keep image markers such as:
+
+```text
+[Image 1: 图片] path=data/images/.../image-0001.webp mime=image/webp
+```
+
 ## Notes
 
 `corpus/`, `data/`, and `index/` are ignored by Git because they may contain private research notes, samples, extracted content, OCR results, or generated indexes.

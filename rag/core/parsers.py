@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import html
+import base64
 import re
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from html.parser import HTMLParser
+from dataclasses import dataclass
 from pathlib import Path
 
 from rag.core.models import ParsedDocument, display_path
@@ -33,16 +35,36 @@ SUPPORTED_EXTENSIONS = HTML_EXTENSIONS | TEXT_EXTENSIONS | DOC_EXTENSIONS | CODE
 MOJIBAKE_MARKERS = set("鏌钖疉椋帶鍙傛暟鍒嗘瀽鍘熷垱瀛ｄ笢骞鏈鏃姹熻嫃寰绯诲垪猻浼氫粠澶村紑濮嬶紝鑻ユ姄鍖呮垨鑰呭叾瀹冨彲浠ョ湅涔嬪墠鐨勬枃绔狅")
 
 
+@dataclass
+class HTMLImage:
+    index: int
+    src: str
+    alt: str = ""
+    title: str = ""
+    local_path: str = ""
+    mime_type: str = ""
+    extracted: bool = False
+
+
 class NormalizingHTMLParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, source_path: str = "", image_output_dir: Path | None = None, project_root: Path | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.title_parts: list[str] = []
         self.image_paths: list[str] = []
+        self.images: list[HTMLImage] = []
+        self.tables: list[list[list[str]]] = []
+        self.source_path = source_path
+        self.image_output_dir = image_output_dir
+        self.project_root = project_root
         self._skip_depth = 0
         self._in_title = False
         self._link_href: str | None = None
         self._tag_stack: list[str] = []
+        self._table_depth = 0
+        self._current_table: list[list[str]] = []
+        self._current_row: list[str] = []
+        self._current_cell_parts: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = {key.lower(): value or "" for key, value in attrs}
@@ -56,6 +78,20 @@ class NormalizingHTMLParser(HTMLParser):
             return
         if tag == "title":
             self._in_title = True
+        elif tag == "table":
+            self._table_depth += 1
+            if self._table_depth == 1:
+                self._current_table = []
+            return
+        elif self._table_depth and tag == "tr":
+            self._current_row = []
+            return
+        elif self._table_depth and tag in {"td", "th"}:
+            self._current_cell_parts = []
+            return
+        elif self._table_depth and tag == "br" and self._current_cell_parts is not None:
+            self._current_cell_parts.append("\n")
+            return
         elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             level = int(tag[1])
             self.parts.append("\n" + "#" * level + " ")
@@ -66,16 +102,7 @@ class NormalizingHTMLParser(HTMLParser):
         elif tag == "a":
             self._link_href = attrs_dict.get("href") or None
         elif tag == "img":
-            src = attrs_dict.get("src", "")
-            alt = attrs_dict.get("alt", "")
-            if src:
-                if src.startswith("data:"):
-                    safe_src = "[inline-image]"
-                else:
-                    safe_src = src
-                    self.image_paths.append(src)
-                label = f"![{alt}]({safe_src})" if alt else f"![image]({safe_src})"
-                self.parts.append(f"\n{label}\n")
+            self.add_image(attrs_dict)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -85,6 +112,23 @@ class NormalizingHTMLParser(HTMLParser):
             return
         if tag == "title":
             self._in_title = False
+        elif tag in {"td", "th"} and self._table_depth:
+            if self._current_cell_parts is not None:
+                self._current_row.append(clean_cell_text("".join(self._current_cell_parts)))
+                self._current_cell_parts = None
+            return
+        elif tag == "tr" and self._table_depth:
+            if any(cell for cell in self._current_row):
+                self._current_table.append(self._current_row)
+            self._current_row = []
+            return
+        elif tag == "table" and self._table_depth:
+            self._table_depth -= 1
+            if self._table_depth == 0 and self._current_table:
+                self.tables.append(self._current_table)
+                self.parts.append("\n\n" + render_markdown_table(self._current_table) + "\n\n")
+                self._current_table = []
+            return
         elif tag in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "li", "tr"}:
             self.parts.append("\n")
         elif tag == "pre":
@@ -102,6 +146,10 @@ class NormalizingHTMLParser(HTMLParser):
         if self._skip_depth:
             return
         text = repair_mojibake(html.unescape(data))
+        if self._table_depth and self._current_cell_parts is not None:
+            if text.strip():
+                self._current_cell_parts.append(text)
+            return
         if self._in_title:
             self.title_parts.append(text.strip())
             return
@@ -116,6 +164,46 @@ class NormalizingHTMLParser(HTMLParser):
 
     def title(self) -> str:
         return " ".join(part for part in self.title_parts if part).strip()
+
+    def add_image(self, attrs: dict[str, str]) -> None:
+        src = attrs.get("src", "").strip()
+        data_src = attrs.get("data-src", "").strip()
+        original_src = attrs.get("data-original", "").strip()
+        src = src or data_src or original_src
+        if not src:
+            return
+
+        alt = repair_mojibake(html.unescape(attrs.get("alt", "").strip()))
+        title = repair_mojibake(html.unescape(attrs.get("title", "").strip()))
+        image = HTMLImage(index=len(self.images) + 1, src=src, alt=alt, title=title)
+
+        if src.startswith("data:"):
+            extracted = extract_data_image(src, self.source_path, image.index, self.image_output_dir, self.project_root)
+            if extracted:
+                image.local_path, image.mime_type = extracted
+                image.extracted = True
+                self.image_paths.append(image.local_path)
+            safe_src = image.local_path or "[inline-image]"
+            image.src = "[inline-image]"
+        else:
+            safe_src = src
+            self.image_paths.append(src)
+
+        self.images.append(image)
+        label = alt or title or f"image-{image.index}"
+        details = [f"[Image {image.index}: {label}]"]
+        if image.local_path:
+            details.append(f"path={image.local_path}")
+        elif not src.startswith("data:"):
+            details.append(f"src={src}")
+        if image.mime_type:
+            details.append(f"mime={image.mime_type}")
+        image_text = " ".join(details)
+        if self._table_depth and self._current_cell_parts is not None:
+            self._current_cell_parts.append(image_text)
+        self.parts.append("\n" + image_text + "\n")
+        if not image.local_path:
+            self.parts.append(f"![{label}]({safe_src})\n")
 
 
 def supported_file(path: Path) -> bool:
@@ -183,7 +271,7 @@ def stable_id(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def parse_file(path: Path, project_root: Path) -> ParsedDocument:
+def parse_file(path: Path, project_root: Path, image_output_dir: Path | None = None) -> ParsedDocument:
     source_path = display_path(path, project_root)
     source_type = source_type_for(path)
     sha256 = file_sha256(path)
@@ -192,11 +280,13 @@ def parse_file(path: Path, project_root: Path) -> ParsedDocument:
 
     if source_type == "html":
         raw_text = read_text(path)
-        parser = NormalizingHTMLParser()
+        parser = NormalizingHTMLParser(source_path=source_path, image_output_dir=image_output_dir, project_root=project_root)
         parser.feed(raw_text)
         text = parser.normalized_text()
         title = parser.title() or path.stem
         metadata["image_paths"] = parser.image_paths
+        metadata["images"] = [image.__dict__ for image in parser.images]
+        metadata["table_count"] = len(parser.tables)
     elif source_type == "pdf":
         text, page_count, parser_name = parse_pdf(path)
         title = path.stem
@@ -223,6 +313,76 @@ def parse_file(path: Path, project_root: Path) -> ParsedDocument:
         mtime=stat.st_mtime,
         metadata=metadata,
     )
+
+
+def clean_cell_text(text: str) -> str:
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def render_markdown_table(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+
+    width = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
+    escaped_rows = [[escape_table_cell(cell) for cell in row] for row in normalized_rows]
+
+    lines = ["| " + " | ".join(escaped_rows[0]) + " |"]
+    if len(escaped_rows) > 1:
+        lines.append("| " + " | ".join("---" for _ in range(width)) + " |")
+        lines.extend("| " + " | ".join(row) + " |" for row in escaped_rows[1:])
+    return "\n".join(lines)
+
+
+def escape_table_cell(text: str) -> str:
+    text = text.replace("|", "\\|")
+    text = re.sub(r"\s*\n\s*", "<br>", text)
+    return text.strip()
+
+
+def extract_data_image(
+    src: str,
+    source_path: str,
+    index: int,
+    image_output_dir: Path | None,
+    project_root: Path | None,
+) -> tuple[str, str] | None:
+    if image_output_dir is None or "," not in src:
+        return None
+
+    header, payload = src.split(",", 1)
+    match = re.match(r"data:(image/[A-Za-z0-9.+-]+);base64", header)
+    if not match:
+        return None
+
+    mime_type = match.group(1).lower()
+    extension = image_extension(mime_type)
+    digest = hashlib.sha256(f"{source_path}:{index}:{payload[:256]}".encode("utf-8")).hexdigest()[:16]
+    target_dir = image_output_dir / stable_id(source_path)[:12]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"image-{index:04d}-{digest}.{extension}"
+    if not target.exists():
+        try:
+            target.write_bytes(base64.b64decode(payload, validate=False))
+        except Exception:
+            return None
+
+    if project_root:
+        return display_path(target, project_root), mime_type
+    return str(target), mime_type
+
+
+def image_extension(mime_type: str) -> str:
+    return {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+        "image/svg+xml": "svg",
+    }.get(mime_type, "bin")
 
 
 def parse_docx(path: Path) -> tuple[str, str]:
